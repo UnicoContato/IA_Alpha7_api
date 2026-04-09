@@ -28,6 +28,7 @@ const REGEX_TERMO_SIMILAR = /\b(similar|similares|sim)\b/gi;
 const REGEX_TERMO_GENERICO_TESTE = /\b(generico|genericos|gen)\b/i;
 const REGEX_TERMO_REFERENCIA_TESTE = /\b(referencia|referencias|ref|etico|etica|marca)\b/i;
 const REGEX_TERMO_SIMILAR_TESTE = /\b(similar|similares|sim)\b/i;
+const REGEX_TERMO_PERFUMARIA = /\b(shampoo|condicionador|sabonete|hidratante|desodorante|perfume|protetor|fralda|absorvente|escova|pasta|creme dental|cosmetico|cosmético)\b/i;
 const STOPWORDS_BUSCA = new Set([
   'de', 'da', 'do', 'das', 'dos', 'e', 'com', 'sem', 'para', 'por', 'na', 'no', 'nas', 'nos',
   'mg', 'ml', 'mcg', 'g', 'ui', 'cp', 'cps', 'caps', 'comp', 'comprimido', 'comprimidos'
@@ -49,7 +50,8 @@ function detectarIntencaoBusca(termo) {
   return {
     querGenerico: REGEX_TERMO_GENERICO_TESTE.test(texto),
     querReferencia: REGEX_TERMO_REFERENCIA_TESTE.test(texto),
-    querSimilar: REGEX_TERMO_SIMILAR_TESTE.test(texto)
+    querSimilar: REGEX_TERMO_SIMILAR_TESTE.test(texto),
+    querPerfumaria: REGEX_TERMO_PERFUMARIA.test(texto)
   };
 }
 
@@ -264,6 +266,14 @@ function obterTipoClassificacaoSolicitada(intencaoBusca) {
 }
 
 function aplicarFiltroPorIntencaoClassificacao(produtos, intencaoBusca) {
+  if (intencaoBusca?.querPerfumaria) {
+    return {
+      produtos,
+      aplicado: false,
+      tipoSolicitado: null
+    };
+  }
+
   const tipoSolicitado = obterTipoClassificacaoSolicitada(intencaoBusca);
   if (!tipoSolicitado) {
     return {
@@ -560,6 +570,173 @@ function logDistribuicao(etapa, produtos, campo) {
   console.log(`[TRACE] ${etapa} | ${campo} => ${resumo || 'vazio'}`);
 }
 
+function pontuarProdutoPerfumaria(produto) {
+  let score = Number(produto?.relevancia_descricao || 0);
+  const descricao = normalizarTextoBuscaMedicamento(produto?.descricao || '');
+  const temPrincipioAtivo = Boolean(produto?.principioativo_nome);
+  const tipoClassificacao = String(produto?.tipo_classificacao_canonica || '').trim().toUpperCase();
+
+  if (!temPrincipioAtivo) {
+    score += 120;
+  } else {
+    score -= 80;
+  }
+
+  if (!tipoClassificacao || tipoClassificacao === 'DESCONHECIDO') {
+    score += 60;
+  } else {
+    score -= 40;
+  }
+
+  if (/\b(shampoo|condicionador|hidratante|sabonete|perfume)\b/.test(descricao)) {
+    score += 25;
+  }
+
+  return score;
+}
+
+function obterCategoriaNaoMedicamento(query) {
+  const texto = normalizarTextoBuscaMedicamento(query);
+
+  if (/\b(fralda|fraldas|frd)\b/.test(texto)) {
+    return 'fralda';
+  }
+
+  if (/\b(shampoo|xampu|sh)\b/.test(texto)) {
+    return 'shampoo';
+  }
+
+  if (/\b(absorvente|absorventes)\b/.test(texto)) {
+    return 'absorvente';
+  }
+
+  return null;
+}
+
+function pontuarProdutoCategoriaNaoMedicamento(produto, query) {
+  let score = pontuarProdutoPerfumaria(produto);
+  const descricao = normalizarTextoBuscaMedicamento(produto?.descricao || '');
+  const embalagem = normalizarTextoBuscaMedicamento(produto?.embalagem_descricao || '');
+  const classificacao = normalizarTextoBuscaMedicamento(produto?.classificacao_nome_origem || '');
+  const categoria = obterCategoriaNaoMedicamento(query);
+  const queryNormalizada = normalizarTextoBuscaMedicamento(query);
+  const textoProduto = `${descricao} ${embalagem} ${classificacao}`;
+
+  if (categoria === 'fralda') {
+    if (/\b(fralda|fraldas|frd)\b/.test(textoProduto)) {
+      score += 160;
+    }
+
+    if (/\bfraldas\b/.test(classificacao) || /\bfralda\b/.test(classificacao)) {
+      score += 180;
+    }
+
+    if (!/\bgeriatr/i.test(queryNormalizada) && /\bgeriatr/i.test(textoProduto)) {
+      score -= 220;
+    }
+
+    if (!/\babsorvente\b/.test(queryNormalizada) && /\babsorvente\b/.test(textoProduto)) {
+      score -= 260;
+    }
+
+    if (/\bfita\b/.test(textoProduto)) {
+      score -= 280;
+    }
+  }
+
+  if (categoria === 'shampoo') {
+    if (/\bshampoo\b/.test(textoProduto)) {
+      score += 140;
+    }
+
+    if (/\bshampoo\b/.test(classificacao)) {
+      score += 160;
+    }
+
+    if (!/\bbaby\b/.test(queryNormalizada) && /\bbaby\b/.test(textoProduto)) {
+      score -= 140;
+    }
+
+    if (/\bkit\b/.test(textoProduto)) {
+      score -= 120;
+    }
+  }
+
+  if (categoria === 'absorvente') {
+    if (/\babsorvente\b/.test(textoProduto)) {
+      score += 160;
+    }
+
+    if (/\bfralda|fraldas|frd\b/.test(textoProduto)) {
+      score -= 180;
+    }
+  }
+
+  return score;
+}
+
+function aplicarFiltroCategoriaNaoMedicamento(produtos, query) {
+  const categoria = obterCategoriaNaoMedicamento(query);
+  const lista = Array.isArray(produtos) ? produtos : [];
+
+  if (!categoria || lista.length === 0) {
+    return {
+      produtos: lista,
+      aplicado: false
+    };
+  }
+
+  if (categoria === 'fralda') {
+    const candidatosDiretos = lista.filter(produto => {
+      const texto = normalizarTextoBuscaMedicamento(
+        `${produto?.descricao || ''} ${produto?.embalagem_descricao || ''} ${produto?.classificacao_nome_origem || ''}`
+      );
+
+      if (!/\b(fralda|fraldas|frd)\b/.test(texto)) {
+        return false;
+      }
+
+      if (/\bfita\b/.test(texto)) {
+        return false;
+      }
+
+      if (/\babsorvente\b/.test(texto)) {
+        return false;
+      }
+
+      if (/\bgeriatr/i.test(texto) && !/\bgeriatr/i.test(normalizarTextoBuscaMedicamento(query))) {
+        return false;
+      }
+
+      return true;
+    });
+
+    if (candidatosDiretos.length > 0) {
+      return {
+        produtos: candidatosDiretos,
+        aplicado: true
+      };
+    }
+  }
+
+  return {
+    produtos: lista,
+    aplicado: false
+  };
+}
+
+function priorizarProdutosPerfumaria(produtos, query = '') {
+  return [...(produtos || [])]
+    .map(produto => ({
+      ...produto,
+      relevancia_descricao: pontuarProdutoCategoriaNaoMedicamento(produto, query)
+    }))
+    .sort((a, b) => {
+      return Number(b.relevancia_descricao || 0) - Number(a.relevancia_descricao || 0)
+        || String(a?.descricao || '').localeCompare(String(b?.descricao || ''));
+    });
+}
+
 function reconstruirTermoComAtributos(termoBase, { formaFarmaceutica, concentracoesBusca } = {}) {
   const partes = [String(termoBase || '').trim()];
 
@@ -669,7 +846,7 @@ router.post('/api/buscar-medicamentos', async (req, res) => {
       concentracoesBusca,
       variacoesConcentracao
     } = extrairContextoBuscaMedicamento(termoBusca);
-    const termoBuscaPrincipal = limparTermoBuscaPrincipal(termoBuscaLimpo)
+    let termoBuscaPrincipal = limparTermoBuscaPrincipal(termoBuscaLimpo)
       || limparTermoBuscaPrincipal(principioAtivoExtraido)
       || limparTermoBuscaPrincipal(termoBusca)
       || termoBuscaLimpo
@@ -677,6 +854,12 @@ router.post('/api/buscar-medicamentos', async (req, res) => {
       || termoBusca;
     let principioAtivoBusca = termoBuscaPrincipal;
     let principioAtivoResolvido = null;
+    const buscaPerfumaria = intencaoBusca.querPerfumaria === true;
+
+    if (buscaPerfumaria) {
+      termoBuscaPrincipal = termoBusca;
+      principioAtivoBusca = termoBusca;
+    }
     let correcaoTermo = null;
 
     const normalizacaoIA = await normalizarBuscaComIA({
@@ -733,7 +916,9 @@ router.post('/api/buscar-medicamentos', async (req, res) => {
     }
 
     let [resultadoPrincipioAtivo, resultadoDescricao] = await Promise.all([
-      buscarPorPrincipioAtivo(principioAtivoBusca, formaFarmaceutica, variacoesForma, variacoesConcentracao),
+      buscaPerfumaria
+        ? Promise.resolve({ encontrado: false, produtos: [], principiosEncontrados: [], metodo: 'principio_ativo_ignorado_perfumaria' })
+        : buscarPorPrincipioAtivo(principioAtivoBusca, formaFarmaceutica, variacoesForma, variacoesConcentracao),
       buscarPorDescricao(termoBuscaDescricao)
     ]);
 
@@ -749,6 +934,15 @@ router.post('/api/buscar-medicamentos', async (req, res) => {
       produtosDescricao = resultadoDescricao.produtos;
       metodosUtilizados.push(resultadoDescricao.metodo);
       logResumoProdutos('Resultado bruto por descricao', produtosDescricao);
+    }
+
+    if (buscaPerfumaria && produtosDescricao.length > 0) {
+      const resultadoFiltroCategoriaDescricao = aplicarFiltroCategoriaNaoMedicamento(produtosDescricao, termoBusca);
+      if (resultadoFiltroCategoriaDescricao.aplicado) {
+        produtosDescricao = resultadoFiltroCategoriaDescricao.produtos;
+        metodosUtilizados.push('filtro_categoria_nao_medicamento_descricao');
+        logResumoProdutos('Resultado bruto por descricao apos filtro semantico de categoria', produtosDescricao);
+      }
     }
 
     if (!resultadoPrincipioAtivo.encontrado && produtosDescricao.length === 0) {
@@ -770,14 +964,16 @@ router.post('/api/buscar-medicamentos', async (req, res) => {
         });
 
         const [resultadoPrincipioCorrigido, resultadoDescricaoCorrigida] = await Promise.all([
-          buscarPorPrincipioAtivo(
-            termoCorrigidoPrincipal,
-            contextoCorrigido.formaFarmaceutica || formaFarmaceutica,
-            contextoCorrigido.variacoesForma.length > 0 ? contextoCorrigido.variacoesForma : variacoesForma,
-            contextoCorrigido.variacoesConcentracao.length > 0
-              ? contextoCorrigido.variacoesConcentracao
-              : variacoesConcentracao
-          ),
+          buscaPerfumaria
+            ? Promise.resolve({ encontrado: false, produtos: [], principiosEncontrados: [], metodo: 'principio_ativo_ignorado_perfumaria' })
+            : buscarPorPrincipioAtivo(
+              termoCorrigidoPrincipal,
+              contextoCorrigido.formaFarmaceutica || formaFarmaceutica,
+              contextoCorrigido.variacoesForma.length > 0 ? contextoCorrigido.variacoesForma : variacoesForma,
+              contextoCorrigido.variacoesConcentracao.length > 0
+                ? contextoCorrigido.variacoesConcentracao
+                : variacoesConcentracao
+            ),
           buscarPorDescricao(termoCorrigidoExpandido)
         ]);
 
@@ -821,7 +1017,9 @@ router.post('/api/buscar-medicamentos', async (req, res) => {
       }
     }
 
-    const produtosDescricaoConfiaveis = selecionarProdutosDescricaoConfiaveis(produtosDescricao, termoBuscaDescricao);
+    const produtosDescricaoConfiaveis = buscaPerfumaria
+      ? priorizarProdutosPerfumaria(produtosDescricao, termoBusca).slice(0, 60)
+      : selecionarProdutosDescricaoConfiaveis(produtosDescricao, termoBuscaDescricao);
     const produtosDescricaoBase = produtosDescricaoConfiaveis.length > 0
       ? produtosDescricaoConfiaveis
       : produtosDescricao;
@@ -829,7 +1027,9 @@ router.post('/api/buscar-medicamentos', async (req, res) => {
       logResumoProdutos('Resultado confiavel por descricao', produtosDescricaoConfiaveis);
     }
 
-    const principioResolvido = resolverPrincipioAtivoDominante(produtosDescricaoConfiaveis, termoBuscaDescricao);
+    const principioResolvido = buscaPerfumaria
+      ? null
+      : resolverPrincipioAtivoDominante(produtosDescricaoConfiaveis, termoBuscaDescricao);
     if (principioResolvido && podeUsarPrincipioResolvido(principioResolvido, principioAtivoBusca || termoBuscaDescricao)) {
       principioAtivoResolvido = principioResolvido.nome;
       principioAtivoBusca = principioAtivoResolvido;
@@ -845,6 +1045,7 @@ router.post('/api/buscar-medicamentos', async (req, res) => {
     }
 
     if (
+      !buscaPerfumaria &&
       principioAtivoResolvido &&
       normalizarTextoBusca(principioAtivoResolvido) !== normalizarTextoBusca(principioAtivoExtraido) &&
       !resultadoPrincipioAtivo.encontrado
@@ -867,23 +1068,27 @@ router.post('/api/buscar-medicamentos', async (req, res) => {
       }
     }
 
-    const principioAtivoIdsDaDescricaoPrioritarios = selecionarPrincipioIdsPreferenciaisDeProdutos(
-      produtosDescricaoBase,
-      principioAtivoBusca,
-      {
-        incluirCompostos: ehTextoComposto(principioAtivoBusca),
-        limite: 10
-      }
-    );
-    const principioAtivoIdsDaDescricao = principioAtivoIdsDaDescricaoPrioritarios.length > 0
-      ? principioAtivoIdsDaDescricaoPrioritarios
-      : [...new Set(
-        produtosDescricaoBase
-          .map(p => p.principioativo_id)
-          .filter(id => id !== null && id !== undefined)
-      )].slice(0, 10);
+    const principioAtivoIdsDaDescricaoPrioritarios = buscaPerfumaria
+      ? []
+      : selecionarPrincipioIdsPreferenciaisDeProdutos(
+        produtosDescricaoBase,
+        principioAtivoBusca,
+        {
+          incluirCompostos: ehTextoComposto(principioAtivoBusca),
+          limite: 10
+        }
+      );
+    const principioAtivoIdsDaDescricao = buscaPerfumaria
+      ? []
+      : (principioAtivoIdsDaDescricaoPrioritarios.length > 0
+        ? principioAtivoIdsDaDescricaoPrioritarios
+        : [...new Set(
+          produtosDescricaoBase
+            .map(p => p.principioativo_id)
+            .filter(id => id !== null && id !== undefined)
+        )].slice(0, 10));
 
-    if (principioAtivoIdsDaDescricao.length > 0) {
+    if (!buscaPerfumaria && principioAtivoIdsDaDescricao.length > 0) {
       console.log(`[TRACE] IDs de principio ativo herdados da descricao: ${principioAtivoIdsDaDescricao.slice(0, 10).join(', ')}`);
       const resultadoExpandidoPorPrincipio = await buscarPorPrincipioAtivoIds(
         principioAtivoIdsDaDescricao.slice(0, 10),
@@ -918,17 +1123,31 @@ router.post('/api/buscar-medicamentos', async (req, res) => {
 
     let produtos = Array.from(produtosMap.values());
 
-    produtos.sort((a, b) => {
-      const scoreA = a.relevancia_descricao || 0;
-      const scoreB = b.relevancia_descricao || 0;
-      return scoreB - scoreA;
-    });
+    if (buscaPerfumaria) {
+      produtos = priorizarProdutosPerfumaria(produtos, termoBusca);
+    } else {
+      produtos.sort((a, b) => {
+        const scoreA = a.relevancia_descricao || 0;
+        const scoreB = b.relevancia_descricao || 0;
+        return scoreB - scoreA;
+      });
+    }
 
     console.log(`[INFO] Total de produtos únicos combinados: ${produtos.length}`);
     logDistribuicao('Distribuicao apos merge', produtos, 'origem');
     logResumoProdutos('Produtos combinados apos merge e ordenacao SQL', produtos);
 
     if (produtos.length > 0) {
+      if (buscaPerfumaria) {
+        const resultadoFiltroCategoria = aplicarFiltroCategoriaNaoMedicamento(produtos, termoBusca);
+        if (resultadoFiltroCategoria.aplicado) {
+          produtos = priorizarProdutosPerfumaria(resultadoFiltroCategoria.produtos, termoBusca);
+          metodosUtilizados.push('filtro_categoria_nao_medicamento');
+          console.log('[TRACE] Filtro semantico de categoria nao-medicamento aplicado');
+          logResumoProdutos('Produtos apos filtro semantico de categoria', produtos);
+        }
+      }
+
       produtos = await verificarDisponibilidade(produtos, unidadeNegocioId);
       console.log(`[INFO] Após verificação de estoque: ${produtos.length} produtos`);
       logResumoProdutos('Produtos apos filtro de estoque', produtos);
@@ -988,7 +1207,8 @@ router.post('/api/buscar-medicamentos', async (req, res) => {
         termoBuscaPrincipal,
         principioAtivoBusca,
         formaFarmaceutica,
-        intencaoClassificacao: intencaoBusca
+        intencaoClassificacao: intencaoBusca,
+        buscaPerfumaria
       });
       produtos = resultadoIA.produtos;
       ordenadoPorIA = resultadoIA.ordenado;

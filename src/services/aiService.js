@@ -367,9 +367,14 @@ function aplicarRegrasDeterministicas(produto, contextoBusca) {
     intencaoClassificacao,
     permitirCompostosComoAlternativa
   } = contextoBusca || {};
+  const buscaPerfumaria = contextoBusca?.buscaPerfumaria === true;
   const relacionadoAtual = produto?.relacionado_busca;
 
   if (relacionadoAtual !== true) {
+    return produto;
+  }
+
+  if (buscaPerfumaria) {
     return produto;
   }
 

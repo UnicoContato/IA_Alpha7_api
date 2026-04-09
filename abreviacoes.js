@@ -96,7 +96,7 @@ const sinonimos = {
     // =========================
     // Bebês / cuidados
     // =========================
-    fralda: ['fralda', 'fraldas', 'fr'],
+    fralda: ['fralda', 'fraldas', 'frd'],
     lenco_umedecido: ['lenco', 'lencos umedecidos'],
     pomada_assadura: ['pomassadura', 'pomada para assadura'],
     mamadeira: ['mam', 'mamadeira'],
@@ -130,13 +130,41 @@ const sinonimos = {
   
   
   // 🔹 Palavras descartáveis (ruído)
-  const STOPWORDS = new Set([
+const STOPWORDS = new Set([
     'de', 'da', 'do', 'dos', 'das',
     'para', 'com', 'sem',
     'ml', 'mg', 'g', 'kg', 'l', 'lt',
     'cx', 'und', 'un',
     'pct', 'kit'
   ]);
+
+const aliasParaCanonico = Object.entries(sinonimos).reduce((acc, [canonico, aliases]) => {
+    aliases.forEach(alias => {
+      const normalizado = String(alias || '')
+        .toLowerCase()
+        .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^a-z0-9\s]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      if (normalizado) {
+        acc[normalizado] = canonico;
+      }
+    });
+
+    const canonicoNormalizado = String(canonico || '')
+      .toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (canonicoNormalizado) {
+      acc[canonicoNormalizado] = canonico;
+    }
+
+    return acc;
+  }, {});
   
   // ============================================================
   // NORMALIZAÇÃO FORTE
@@ -166,17 +194,20 @@ const sinonimos = {
   // ============================================================
   // EXPANSÃO CONTROLADA (SEM EXPLODIR)
   // ============================================================
-  function expandirTokens(tokens) {
-    const resultado = new Set(tokens);
+function expandirTokens(tokens) {
+  const resultado = new Set(tokens);
   
-    tokens.forEach(token => {
-      if (sinonimos[token]) {
-        sinonimos[token].forEach(s => resultado.add(s));
+  tokens.forEach(token => {
+      const canonico = sinonimos[token] ? token : aliasParaCanonico[token];
+
+      if (canonico && sinonimos[canonico]) {
+        resultado.add(canonico);
+        sinonimos[canonico].forEach(s => resultado.add(s));
       }
-    });
+  });
   
-    return Array.from(resultado);
-  }
+  return Array.from(resultado);
+}
   
   // ============================================================
   // API PÚBLICA — mantém compatibilidade
