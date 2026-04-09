@@ -2,6 +2,7 @@ const { formasFarmaceuticas } = require('../../similarity');
 
 const REGEX_CONCENTRACAO = /\b\d+(?:[.,]\d+)?\s?(?:mg|mcg|g|ui)(?:\s*\/\s*(?:\d+(?:[.,]\d+)?\s*)?(?:ml|g|ui))?\b/gi;
 const STOPWORDS_LIMPEZA = /\b(em|de|da|do|das|dos|na|no|nas|nos|com|para|por|mg|ml|mcg|g|ui|cp|cps|caps|comp|comprimido|comprimidos)\b/gi;
+const FORMAS_LOOKUP = criarLookupFormas();
 
 function escapeRegex(valor) {
   return String(valor || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -22,6 +23,32 @@ function limparEspacos(valor) {
     .trim();
 }
 
+function criarLookupFormas() {
+  const lookup = [];
+
+  Object.entries(formasFarmaceuticas || {}).forEach(([formaCanonica, variacoes]) => {
+    const canonicaNormalizada = normalizarTextoBusca(formaCanonica);
+    if (canonicaNormalizada) {
+      lookup.push({
+        token: canonicaNormalizada,
+        formaCanonica: canonicaNormalizada
+      });
+    }
+
+    (variacoes || []).forEach(variacao => {
+      const token = normalizarTextoBusca(variacao);
+      if (token && token.length > 1) {
+        lookup.push({
+          token,
+          formaCanonica: canonicaNormalizada
+        });
+      }
+    });
+  });
+
+  return lookup;
+}
+
 function extrairConcentracoes(termo) {
   const matches = String(termo || '').match(REGEX_CONCENTRACAO) || [];
   const unicos = new Set();
@@ -34,6 +61,24 @@ function extrairConcentracoes(termo) {
   });
 
   return [...unicos];
+}
+
+function extrairFormasDeTexto(texto) {
+  const descricao = normalizarTextoBusca(texto);
+  if (!descricao) {
+    return [];
+  }
+
+  const formas = new Set();
+
+  FORMAS_LOOKUP.forEach(item => {
+    const regex = new RegExp(`(^|\\s)${escapeRegex(item.token)}(\\s|$)`, 'i');
+    if (regex.test(descricao)) {
+      formas.add(item.formaCanonica);
+    }
+  });
+
+  return [...formas];
 }
 
 function gerarVariacoesConcentracao(concentracoes) {
@@ -155,7 +200,9 @@ function gerarVariacoesPrincipioAtivo(termo) {
 }
 
 module.exports = {
+  extrairConcentracoes,
   extrairFormaFarmaceutica,
+  extrairFormasDeTexto,
   extrairContextoBuscaMedicamento,
   gerarVariacoesConcentracao,
   gerarVariacoesPrincipioAtivo,

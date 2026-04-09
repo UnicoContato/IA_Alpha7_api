@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PORT="${PORT:-5232}"
+if [[ -f ".env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source ".env"
+  set +a
+fi
+
+: "${PORT:?PORT nao definido no ambiente}"
 BASE_URL="${BASE_URL:-http://localhost:${PORT}}"
 QUERY="${1:-dipirona}"
 UNIDADE_NEGOCIO_ID="${UNIDADE_NEGOCIO_ID:-70826}"

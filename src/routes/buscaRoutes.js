@@ -4,13 +4,17 @@ const {
   buscarPorPrincipioAtivo,
   buscarPorPrincipioAtivoIds,
   buscarPrincipiosAtivosPorTermoFlexivel,
+  sugerirCorrecaoTermo,
   verificarDisponibilidade
 } = require('../db/queries');
 const { enriquecerClassificacaoCanonica } = require('../db/classificacaoQueries');
 const { ordenarPorIA } = require('../services/aiService');
 const { analisarNecessidadeDeClarificacao } = require('../services/clarificacaoService');
+const { normalizarBuscaComIA } = require('../services/preBuscaAiService');
 const {
+  extrairConcentracoes,
   extrairContextoBuscaMedicamento,
+  extrairFormasDeTexto,
   gerarVariacoesPrincipioAtivo,
   normalizarTextoBusca: normalizarTextoBuscaMedicamento
 } = require('../utils/searchUtils');
@@ -361,7 +365,7 @@ function ordenarProdutosPorPrincipioAtivo(produtos, principioAtivoBase, intencao
     });
 }
 
-async function prepararProdutosRecuperados(produtos, unidadeNegocioId, intencaoBusca, principioAtivoBase) {
+async function prepararProdutosRecuperados(produtos, unidadeNegocioId, intencaoBusca, principioAtivoBase, contextoAtributos = {}) {
   let lista = ordenarProdutosPorPrincipioAtivo(produtos, principioAtivoBase, intencaoBusca);
 
   if (lista.length > 0) {
@@ -377,6 +381,11 @@ async function prepararProdutosRecuperados(produtos, unidadeNegocioId, intencaoB
     lista = resultadoFiltroClassificacao.produtos;
   }
 
+  if (lista.length > 0) {
+    const resultadoFiltroAtributos = aplicarFiltroEstritoPorAtributos(lista, contextoAtributos);
+    lista = resultadoFiltroAtributos.produtos;
+  }
+
   return ordenarProdutosPorPrincipioAtivo(lista, principioAtivoBase, intencaoBusca);
 }
 
@@ -388,6 +397,7 @@ async function executarFallbackPorPrincipioAtivo({
   produtosAtuais,
   formaFarmaceutica,
   variacoesForma,
+  concentracoesBusca,
   variacoesConcentracao,
   unidadeNegocioId,
   intencaoBusca
@@ -433,7 +443,13 @@ async function executarFallbackPorPrincipioAtivo({
       resultadoBuscaIds.produtos.map(produto => ({ ...produto, origem: 'fallback_principio_ativo' })),
       unidadeNegocioId,
       intencaoBusca,
-      termoBase
+      termoBase,
+      {
+        formaFarmaceutica,
+        variacoesForma,
+        concentracoesBusca,
+        variacoesConcentracao
+      }
     );
 
     const resultadoIA = await ordenarPorIA(produtosPreparados, {
@@ -544,6 +560,90 @@ function logDistribuicao(etapa, produtos, campo) {
   console.log(`[TRACE] ${etapa} | ${campo} => ${resumo || 'vazio'}`);
 }
 
+function reconstruirTermoComAtributos(termoBase, { formaFarmaceutica, concentracoesBusca } = {}) {
+  const partes = [String(termoBase || '').trim()];
+
+  if (formaFarmaceutica) {
+    partes.push(String(formaFarmaceutica).trim());
+  }
+
+  (concentracoesBusca || []).forEach(concentracao => {
+    partes.push(String(concentracao).trim());
+  });
+
+  return partes.filter(Boolean).join(' ').trim();
+}
+
+function deveExecutarFallbackDescricaoOriginal({ termoBusca, termoBuscaPrincipal, concentracoesBusca, correcaoAplicada }) {
+  if (correcaoAplicada) {
+    return false;
+  }
+
+  if (termoBuscaPrincipal === termoBusca) {
+    return false;
+  }
+
+  if (Array.isArray(concentracoesBusca) && concentracoesBusca.length > 0) {
+    return false;
+  }
+
+  return true;
+}
+
+function extrairAtributosProdutoBusca(produto) {
+  const texto = `${produto?.descricao || ''} ${produto?.embalagem_descricao || ''}`;
+
+  return {
+    concentracoes: extrairConcentracoes(texto),
+    formas: extrairFormasDeTexto(texto)
+  };
+}
+
+function aplicarFiltroEstritoPorAtributos(produtos, contextoBusca) {
+  let lista = Array.isArray(produtos) ? [...produtos] : [];
+  const regrasAplicadas = [];
+  const concentracoesSolicitadas = [...new Set(contextoBusca?.concentracoesBusca || [])];
+  const formasSolicitadas = [...new Set(contextoBusca?.variacoesForma || [])];
+  const formaCanonicaSolicitada = contextoBusca?.formaFarmaceutica
+    ? normalizarTextoBuscaMedicamento(contextoBusca.formaFarmaceutica)
+    : null;
+
+  if (concentracoesSolicitadas.length > 0 && lista.length > 0) {
+    const comMatchConcentracao = lista.filter(produto => {
+      const atributos = extrairAtributosProdutoBusca(produto);
+      return atributos.concentracoes.some(concentracao => concentracoesSolicitadas.includes(concentracao));
+    });
+
+    if (comMatchConcentracao.length > 0 && comMatchConcentracao.length < lista.length) {
+      lista = comMatchConcentracao;
+      regrasAplicadas.push(`concentracao:${concentracoesSolicitadas.join('|')}`);
+    }
+  }
+
+  if ((formaCanonicaSolicitada || formasSolicitadas.length > 0) && lista.length > 0) {
+    const formasSolicitadasNormalizadas = new Set([
+      ...formasSolicitadas.map(item => normalizarTextoBuscaMedicamento(item)),
+      formaCanonicaSolicitada
+    ].filter(Boolean));
+
+    const comMatchForma = lista.filter(produto => {
+      const atributos = extrairAtributosProdutoBusca(produto);
+      return atributos.formas.some(forma => formasSolicitadasNormalizadas.has(normalizarTextoBuscaMedicamento(forma)));
+    });
+
+    if (comMatchForma.length > 0 && comMatchForma.length < lista.length) {
+      lista = comMatchForma;
+      regrasAplicadas.push(`forma:${[...formasSolicitadasNormalizadas].join('|')}`);
+    }
+  }
+
+  return {
+    produtos: lista,
+    aplicado: regrasAplicadas.length > 0,
+    regrasAplicadas
+  };
+}
+
 router.post('/api/buscar-medicamentos', async (req, res) => {
   try {
     const { query, unidade_negocio_id } = req.body;
@@ -577,6 +677,33 @@ router.post('/api/buscar-medicamentos', async (req, res) => {
       || termoBusca;
     let principioAtivoBusca = termoBuscaPrincipal;
     let principioAtivoResolvido = null;
+    let correcaoTermo = null;
+
+    const normalizacaoIA = await normalizarBuscaComIA({
+      termoOriginal: termoBusca,
+      termoBase: termoBuscaPrincipal,
+      formaFarmaceutica,
+      concentracoesBusca
+    });
+
+    if (
+      normalizacaoIA?.termo_corrigido &&
+      normalizacaoIA.manter_original !== true &&
+      normalizacaoIA.confianca >= 0.9 &&
+      normalizarTextoBusca(normalizacaoIA.termo_corrigido) !== normalizarTextoBusca(termoBuscaPrincipal)
+    ) {
+      console.log(
+        `[TRACE] IA pre-busca normalizou termo: "${termoBuscaPrincipal}" -> "${normalizacaoIA.termo_corrigido}" ` +
+        `| confianca=${normalizacaoIA.confianca.toFixed(3)} | motivo=${normalizacaoIA.justificativa_curta || 'n/a'}`
+      );
+      principioAtivoBusca = normalizacaoIA.termo_corrigido;
+      correcaoTermo = {
+        termo_original: termoBuscaPrincipal,
+        termo_corrigido: normalizacaoIA.termo_corrigido,
+        origem: 'ia_pre_busca',
+        score: normalizacaoIA.confianca
+      };
+    }
 
     console.log(`[INFO] Termo principal de busca: "${termoBuscaPrincipal}"`);
     console.log(
@@ -595,16 +722,20 @@ router.post('/api/buscar-medicamentos', async (req, res) => {
     let produtosDescricao = [];
     let principiosEncontrados = [];
     let metodosUtilizados = [];
+    let termoBuscaDescricao = principioAtivoBusca;
+    let termoBuscaDescricaoExpandido = reconstruirTermoComAtributos(principioAtivoBusca, {
+      formaFarmaceutica,
+      concentracoesBusca
+    });
+
+    if (correcaoTermo?.origem === 'ia_pre_busca') {
+      metodosUtilizados.push('ia_pre_busca');
+    }
 
     let [resultadoPrincipioAtivo, resultadoDescricao] = await Promise.all([
       buscarPorPrincipioAtivo(principioAtivoBusca, formaFarmaceutica, variacoesForma, variacoesConcentracao),
-      buscarPorDescricao(termoBuscaPrincipal)
+      buscarPorDescricao(termoBuscaDescricao)
     ]);
-
-    if ((!resultadoDescricao.produtos || resultadoDescricao.produtos.length === 0) && termoBuscaPrincipal !== termoBusca) {
-      console.log(`[TRACE] Fallback de descricao com termo original: "${termoBusca}"`);
-      resultadoDescricao = await buscarPorDescricao(termoBusca);
-    }
 
     if (resultadoPrincipioAtivo.encontrado) {
       produtosPrincipioAtivo = resultadoPrincipioAtivo.produtos;
@@ -620,7 +751,77 @@ router.post('/api/buscar-medicamentos', async (req, res) => {
       logResumoProdutos('Resultado bruto por descricao', produtosDescricao);
     }
 
-    const produtosDescricaoConfiaveis = selecionarProdutosDescricaoConfiaveis(produtosDescricao, termoBuscaPrincipal);
+    if (!resultadoPrincipioAtivo.encontrado && produtosDescricao.length === 0) {
+      const sugestaoCorrecao = await sugerirCorrecaoTermo(termoBuscaPrincipal);
+
+      if (sugestaoCorrecao?.termo_corrigido) {
+        console.log(
+          `[TRACE] Correcao automatica candidata: "${termoBuscaPrincipal}" -> "${sugestaoCorrecao.termo_corrigido}" ` +
+          `| origem=${sugestaoCorrecao.origem} | score=${sugestaoCorrecao.score.toFixed(3)}`
+        );
+
+        const contextoCorrigido = extrairContextoBuscaMedicamento(sugestaoCorrecao.termo_corrigido);
+        const termoCorrigidoPrincipal = limparTermoBuscaPrincipal(contextoCorrigido.termoBuscaLimpo)
+          || limparTermoBuscaPrincipal(contextoCorrigido.principioAtivoBusca)
+          || sugestaoCorrecao.termo_corrigido;
+        const termoCorrigidoExpandido = reconstruirTermoComAtributos(termoCorrigidoPrincipal, {
+          formaFarmaceutica: contextoCorrigido.formaFarmaceutica || formaFarmaceutica,
+          concentracoesBusca
+        });
+
+        const [resultadoPrincipioCorrigido, resultadoDescricaoCorrigida] = await Promise.all([
+          buscarPorPrincipioAtivo(
+            termoCorrigidoPrincipal,
+            contextoCorrigido.formaFarmaceutica || formaFarmaceutica,
+            contextoCorrigido.variacoesForma.length > 0 ? contextoCorrigido.variacoesForma : variacoesForma,
+            contextoCorrigido.variacoesConcentracao.length > 0
+              ? contextoCorrigido.variacoesConcentracao
+              : variacoesConcentracao
+          ),
+          buscarPorDescricao(termoCorrigidoExpandido)
+        ]);
+
+        if (resultadoPrincipioCorrigido.encontrado) {
+          correcaoTermo = correcaoTermo || sugestaoCorrecao;
+          resultadoPrincipioAtivo = resultadoPrincipioCorrigido;
+          produtosPrincipioAtivo = resultadoPrincipioCorrigido.produtos;
+          principiosEncontrados = resultadoPrincipioCorrigido.principiosEncontrados || [];
+          metodosUtilizados.push(`correcao_termo_${resultadoPrincipioCorrigido.metodo}`);
+          principioAtivoBusca = termoCorrigidoPrincipal;
+          termoBuscaDescricao = termoCorrigidoPrincipal;
+          termoBuscaDescricaoExpandido = termoCorrigidoExpandido;
+        }
+
+        if (resultadoDescricaoCorrigida.encontrado) {
+          correcaoTermo = correcaoTermo || sugestaoCorrecao;
+          resultadoDescricao = resultadoDescricaoCorrigida;
+          produtosDescricao = resultadoDescricaoCorrigida.produtos;
+          metodosUtilizados.push(`correcao_termo_${resultadoDescricaoCorrigida.metodo}`);
+          termoBuscaDescricao = termoCorrigidoPrincipal;
+          termoBuscaDescricaoExpandido = termoCorrigidoExpandido;
+        }
+      }
+    }
+
+    if (
+      (!resultadoDescricao.produtos || resultadoDescricao.produtos.length === 0) &&
+      deveExecutarFallbackDescricaoOriginal({
+        termoBusca,
+        termoBuscaPrincipal,
+        concentracoesBusca,
+        correcaoAplicada: correcaoTermo !== null
+      })
+    ) {
+      console.log(`[TRACE] Fallback de descricao com termo original: "${termoBusca}"`);
+      resultadoDescricao = await buscarPorDescricao(termoBusca);
+
+      if (resultadoDescricao.produtos && resultadoDescricao.produtos.length > 0) {
+        termoBuscaDescricao = termoBusca;
+        termoBuscaDescricaoExpandido = termoBusca;
+      }
+    }
+
+    const produtosDescricaoConfiaveis = selecionarProdutosDescricaoConfiaveis(produtosDescricao, termoBuscaDescricao);
     const produtosDescricaoBase = produtosDescricaoConfiaveis.length > 0
       ? produtosDescricaoConfiaveis
       : produtosDescricao;
@@ -628,8 +829,8 @@ router.post('/api/buscar-medicamentos', async (req, res) => {
       logResumoProdutos('Resultado confiavel por descricao', produtosDescricaoConfiaveis);
     }
 
-    const principioResolvido = resolverPrincipioAtivoDominante(produtosDescricaoConfiaveis, termoBuscaPrincipal);
-    if (principioResolvido && podeUsarPrincipioResolvido(principioResolvido, principioAtivoExtraido || termoBuscaPrincipal)) {
+    const principioResolvido = resolverPrincipioAtivoDominante(produtosDescricaoConfiaveis, termoBuscaDescricao);
+    if (principioResolvido && podeUsarPrincipioResolvido(principioResolvido, principioAtivoBusca || termoBuscaDescricao)) {
       principioAtivoResolvido = principioResolvido.nome;
       principioAtivoBusca = principioAtivoResolvido;
       console.log(
@@ -740,6 +941,24 @@ router.post('/api/buscar-medicamentos', async (req, res) => {
     }
 
     if (produtos.length > 0) {
+      const resultadoFiltroAtributos = aplicarFiltroEstritoPorAtributos(produtos, {
+        formaFarmaceutica,
+        variacoesForma,
+        concentracoesBusca,
+        variacoesConcentracao
+      });
+
+      if (resultadoFiltroAtributos.aplicado) {
+        produtos = resultadoFiltroAtributos.produtos;
+        metodosUtilizados.push(`filtro_atributos_${resultadoFiltroAtributos.regrasAplicadas.join('__')}`);
+        console.log(
+          `[TRACE] Filtro estrito por atributos aplicado: ${resultadoFiltroAtributos.regrasAplicadas.join(' | ')}`
+        );
+        logResumoProdutos('Produtos apos filtro estrito por atributos', produtos);
+      }
+    }
+
+    if (produtos.length > 0) {
       const resultadoFiltroClassificacao = aplicarFiltroPorIntencaoClassificacao(produtos, intencaoBusca);
 
       if (resultadoFiltroClassificacao.aplicado) {
@@ -789,6 +1008,7 @@ router.post('/api/buscar-medicamentos', async (req, res) => {
         produtosAtuais: produtos,
         formaFarmaceutica,
         variacoesForma,
+        concentracoesBusca,
         variacoesConcentracao,
         unidadeNegocioId,
         intencaoBusca
@@ -863,11 +1083,13 @@ router.post('/api/buscar-medicamentos', async (req, res) => {
     return res.status(200).json({
       busca: {
         termo_original: termoBusca,
-        principio_ativo_extraido: principioAtivoResolvido || principioAtivoExtraido || (resultadoPrincipioAtivo.encontrado ? principioAtivoBusca : null),
+        termo_corrigido: correcaoTermo?.termo_corrigido || null,
+        principio_ativo_extraido: principioAtivoResolvido || principioAtivoBusca || principioAtivoExtraido || null,
         forma_farmaceutica: formaFarmaceutica
       },
       metadados: {
         metodo_busca: metodoBusca,
+        correcao_automatica_aplicada: correcaoTermo !== null,
         ordenado_por_ia: ordenadoPorIA,
         filtrado_por_ia: filtradoPorIA,
         avaliado_por_ia: avaliadoPorIA,

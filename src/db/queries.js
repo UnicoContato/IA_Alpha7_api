@@ -6,6 +6,11 @@ const STOPWORDS_ATIVO = new Set([
   'de', 'da', 'do', 'das', 'dos', 'e', 'com', 'sem', 'para', 'por',
   'mg', 'ml', 'mcg', 'g', 'ui', 'cp', 'cps', 'caps', 'comp'
 ]);
+const SUFIXOS_DESCARTAVEIS_CORRECAO = new Set([
+  'sodica', 'sodico', 'potassica', 'potassico', 'monoidratada', 'monoidratado',
+  'monohidratada', 'monohidratado', 'hidratada', 'hidratado', 'cloridrato',
+  'cloridrato', 'maleato', 'besilato', 'dicloridrato', 'hemifumarato', 'nimesulida'
+]);
 
 function normalizarTextoBusca(valor) {
   return String(valor || '')
@@ -67,6 +72,265 @@ function pontuarNomePrincipioAtivo(nomePrincipio, termosBusca) {
   });
 
   return score;
+}
+
+function removerDuplicacaoSequencial(token) {
+  return String(token || '').replace(/(.)\1+/g, '$1');
+}
+
+function gerarVariantesCorrecaoToken(token) {
+  const base = normalizarTextoBusca(token);
+  const variantes = new Set();
+
+  if (!base || base.length < 4) {
+    return [];
+  }
+
+  variantes.add(base);
+  variantes.add(removerDuplicacaoSequencial(base));
+  variantes.add(base.slice(0, 4));
+  variantes.add(base.slice(0, 5));
+  variantes.add(base.slice(0, 6));
+
+  [
+    ['z', 's'],
+    ['s', 'z'],
+    ['y', 'i'],
+    ['i', 'y'],
+    ['k', 'c'],
+    ['c', 'k'],
+    ['p', 'r'],
+    ['r', 'p']
+  ].forEach(([origem, destino]) => {
+    if (base.includes(origem)) {
+      variantes.add(base.replace(new RegExp(origem, 'g'), destino));
+    }
+  });
+
+  if (base.endsWith('oo') || base.endsWith('aa')) {
+    variantes.add(base.slice(0, -1));
+  }
+
+  return [...variantes].filter(item => item.length >= 4);
+}
+
+function gerarFragmentosCorrecao(termo) {
+  const tokens = extrairTokensBusca(termo);
+  const fragmentos = new Set();
+
+  tokens.forEach(token => {
+    gerarVariantesCorrecaoToken(token).forEach(variante => {
+      if (variante.length >= 4) {
+        fragmentos.add(variante.slice(0, 4));
+      }
+
+      if (variante.length >= 5) {
+        fragmentos.add(variante.slice(0, 5));
+        fragmentos.add(variante.slice(-4));
+      }
+
+      for (let idx = 0; idx <= variante.length - 3; idx += 1) {
+        fragmentos.add(variante.slice(idx, idx + 3));
+      }
+    });
+  });
+
+  return [...fragmentos].filter(Boolean).slice(0, 18);
+}
+
+function levenshtein(a, b) {
+  const origem = normalizarTextoBusca(a);
+  const destino = normalizarTextoBusca(b);
+
+  if (!origem) {
+    return destino.length;
+  }
+
+  if (!destino) {
+    return origem.length;
+  }
+
+  const matriz = Array.from({ length: origem.length + 1 }, () => new Array(destino.length + 1).fill(0));
+
+  for (let i = 0; i <= origem.length; i += 1) {
+    matriz[i][0] = i;
+  }
+
+  for (let j = 0; j <= destino.length; j += 1) {
+    matriz[0][j] = j;
+  }
+
+  for (let i = 1; i <= origem.length; i += 1) {
+    for (let j = 1; j <= destino.length; j += 1) {
+      const custo = origem[i - 1] === destino[j - 1] ? 0 : 1;
+      matriz[i][j] = Math.min(
+        matriz[i - 1][j] + 1,
+        matriz[i][j - 1] + 1,
+        matriz[i - 1][j - 1] + custo
+      );
+    }
+  }
+
+  return matriz[origem.length][destino.length];
+}
+
+function calcularScoreCorrecao(termo, candidato) {
+  const termoNormalizado = normalizarTextoBusca(termo);
+  const candidatoNormalizado = normalizarTextoBusca(candidato);
+  const distancia = levenshtein(termoNormalizado, candidatoNormalizado);
+  const tamanhoBase = Math.max(termoNormalizado.length, candidatoNormalizado.length, 1);
+  const similaridade = 1 - (distancia / tamanhoBase);
+  let score = similaridade;
+
+  if (candidatoNormalizado.startsWith(termoNormalizado) || termoNormalizado.startsWith(candidatoNormalizado)) {
+    score += 0.08;
+  }
+
+  const tokensTermo = extrairTokensBusca(termoNormalizado);
+  const tokensCandidato = extrairTokensBusca(candidatoNormalizado);
+  if (
+    tokensTermo.length > 0 &&
+    tokensTermo.every(token => tokensCandidato.some(item => tokensSaoCompativeis(token, item)))
+  ) {
+    score += 0.08;
+  }
+
+  return {
+    score,
+    similaridade,
+    distancia
+  };
+}
+
+function gerarVariantesCanonicasCorrecao(candidato) {
+  const texto = normalizarTextoBusca(candidato);
+  if (!texto) {
+    return [];
+  }
+
+  const tokens = extrairTokensBusca(texto);
+  const tokensCanonicos = tokens.filter(token => !SUFIXOS_DESCARTAVEIS_CORRECAO.has(token));
+  const baseCanonica = tokensCanonicos.length > 0 ? tokensCanonicos : tokens;
+  const variantes = new Set([texto]);
+
+  if (baseCanonica.length > 0) {
+    variantes.add(baseCanonica.join(' '));
+    variantes.add(baseCanonica[0]);
+  }
+
+  if (baseCanonica.length >= 2) {
+    variantes.add(baseCanonica.slice(0, 2).join(' '));
+  }
+
+  return [...variantes].filter(Boolean);
+}
+
+async function buscarCandidatosCorrecaoTermo(termoBusca, limite = 80) {
+  const fragmentos = gerarFragmentosCorrecao(termoBusca);
+  if (fragmentos.length === 0) {
+    return [];
+  }
+
+  const nomeNormalizadoPrincipio = `
+    lower(
+      translate(
+        coalesce(nome, ''),
+        'ÃÃ€ÃƒÃ‚Ã„Ã¡Ã Ã£Ã¢Ã¤Ã‰ÃˆÃŠÃ‹Ã©Ã¨ÃªÃ«ÃÃŒÃŽÃÃ­Ã¬Ã®Ã¯Ã“Ã’Ã•Ã”Ã–Ã³Ã²ÃµÃ´Ã¶ÃšÃ™Ã›ÃœÃºÃ¹Ã»Ã¼Ã‡Ã§',
+        'AAAAAaaaaaEEEEeeeeIIIIiiiiOOOOOoooooUUUUuuuuCc'
+      )
+    )
+  `;
+  const descricaoNormalizada = `
+    lower(
+      translate(
+        coalesce(p.descricao, ''),
+        'ÃÃ€ÃƒÃ‚Ã„Ã¡Ã Ã£Ã¢Ã¤Ã‰ÃˆÃŠÃ‹Ã©Ã¨ÃªÃ«ÃÃŒÃŽÃÃ­Ã¬Ã®Ã¯Ã“Ã’Ã•Ã”Ã–Ã³Ã²ÃµÃ´Ã¶ÃšÃ™Ã›ÃœÃºÃ¹Ã»Ã¼Ã‡Ã§',
+        'AAAAAaaaaaEEEEeeeeIIIIiiiiOOOOOoooooUUUUuuuuCc'
+      )
+    )
+  `;
+  const condicoesPrincipio = fragmentos.map((_, idx) => `${nomeNormalizadoPrincipio} LIKE $${idx + 1}`).join(' OR ');
+  const condicoesDescricao = fragmentos.map((_, idx) => `${descricaoNormalizada} LIKE $${idx + 1}`).join(' OR ');
+  const params = fragmentos.map(fragmento => `%${fragmento}%`);
+
+  const [principios, produtos] = await Promise.all([
+    pool.query(`
+      SELECT DISTINCT nome AS texto_candidato, 'principio_ativo' AS origem
+      FROM principioativo
+      WHERE ${condicoesPrincipio}
+      ORDER BY nome
+      LIMIT ${limite}
+    `, params),
+    pool.query(`
+      SELECT DISTINCT p.descricao AS texto_candidato, 'descricao_produto' AS origem
+      FROM produto p
+      WHERE p.status = 'A'
+        AND ${condicoesDescricao}
+      ORDER BY p.descricao
+      LIMIT ${limite}
+    `, params)
+  ]);
+
+  return [...principios.rows, ...produtos.rows];
+}
+
+async function sugerirCorrecaoTermo(termoBusca) {
+  const termoNormalizado = normalizarTextoBusca(termoBusca);
+  const termosPrioritarios = [
+    termoBusca,
+    ...gerarVariantesCorrecaoToken(termoBusca)
+  ];
+  const principiosPrioritarios = await buscarPrincipiosAtivosPorTermoFlexivel(termosPrioritarios, 20);
+  const candidatosPrincipio = principiosPrioritarios.map(item => ({
+    texto_candidato: item.nome,
+    origem: 'principio_ativo_flexivel'
+  }));
+  const candidatosDescricao = await buscarCandidatosCorrecaoTermo(termoBusca);
+  const candidatos = [...candidatosPrincipio, ...candidatosDescricao];
+
+  if (!termoNormalizado || candidatos.length === 0) {
+    return null;
+  }
+
+  const melhor = candidatos
+    .flatMap(candidato => {
+      const textoCandidato = String(candidato?.texto_candidato || '').trim();
+
+      return gerarVariantesCanonicasCorrecao(textoCandidato).map(variante => {
+        const { score, similaridade, distancia } = calcularScoreCorrecao(termoNormalizado, variante);
+
+        return {
+          termo_original: termoBusca,
+          termo_corrigido: variante.toUpperCase(),
+          origem: candidato.origem,
+          score,
+          similaridade,
+          distancia,
+          candidato_original: textoCandidato
+        };
+      });
+    })
+    .filter(item => item.distancia > 0)
+    .sort((a, b) => {
+      return b.score - a.score
+        || a.distancia - b.distancia
+        || String(a.candidato_original || '').length - String(b.candidato_original || '').length
+        || String(a.termo_corrigido).localeCompare(String(b.termo_corrigido));
+    })[0];
+
+  if (!melhor) {
+    return null;
+  }
+
+  const tamanho = termoNormalizado.length;
+  const distanciaMaxima = tamanho >= 9 ? 3 : 2;
+  const scoreMinimo = tamanho >= 8 ? 0.74 : 0.78;
+
+  if (melhor.distancia > distanciaMaxima || melhor.score < scoreMinimo) {
+    return null;
+  }
+
+  return melhor;
 }
 
 function adicionarFiltrosDescricao(queryProdutos, params, startIdx, { variacoesForma = [], variacoesConcentracao = [] } = {}) {
@@ -808,6 +1072,8 @@ async function verificarDisponibilidade(produtos, unidadeNegocioId) {
 
 module.exports = {
   buscarPrecosEOfertas,
+  buscarCandidatosCorrecaoTermo,
+  sugerirCorrecaoTermo,
   buscarPorDescricao,
   buscarPorPrincipioAtivo,
   buscarPorPrincipioAtivoIds,
