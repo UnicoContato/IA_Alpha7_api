@@ -3,6 +3,7 @@ const { requireIntEnv } = require('./src/config/env');
 
 const { router } = require('./src/routes/buscaRoutes');
 
+
 const app = express();
 app.use(express.json());
 app.use(router);
