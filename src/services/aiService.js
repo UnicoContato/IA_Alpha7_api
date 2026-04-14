@@ -36,6 +36,51 @@ function extrairTokensAtivo(valor) {
     .filter(token => token.length >= 3 && !STOPWORDS_ATIVO.has(token));
 }
 
+function tokenDiretoCombinaComDescricao(tokenBusca, tokenDescricao) {
+  if (!tokenBusca || !tokenDescricao) {
+    return false;
+  }
+
+  if (tokenBusca === tokenDescricao) {
+    return true;
+  }
+
+  if (/^\d+$/.test(tokenBusca)) {
+    return tokenDescricao.startsWith(tokenBusca);
+  }
+
+  if (tokenBusca.length < 5) {
+    return false;
+  }
+
+  return tokenDescricao.startsWith(tokenBusca);
+}
+
+function produtoTemMatchDiretoNaDescricao(produto, termoBusca) {
+  const tokensBusca = normalizarTexto(termoBusca)
+    .split(' ')
+    .filter(Boolean);
+  const tokensDescricao = normalizarTexto(produto?.descricao)
+    .split(' ')
+    .filter(Boolean);
+
+  if (tokensBusca.length === 0 || tokensDescricao.length === 0) {
+    return false;
+  }
+
+  for (let idx = 0; idx <= tokensDescricao.length - tokensBusca.length; idx += 1) {
+    const combina = tokensBusca.every((tokenBusca, offset) => (
+      tokenDiretoCombinaComDescricao(tokenBusca, tokensDescricao[idx + offset])
+    ));
+
+    if (combina) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function tokensSaoCompativeis(tokenBusca, tokenProduto) {
   if (!tokenBusca || !tokenProduto) {
     return false;
@@ -104,6 +149,7 @@ function contarTokensCompativeis(tokensBusca, tokensProduto) {
 
 function pontuarCandidatoParaIA(produto, contextoBusca) {
   const termoBase = contextoBusca?.principioAtivoBusca || contextoBusca?.termoBuscaPrincipal || contextoBusca?.termoBusca || '';
+  const termoPrincipal = contextoBusca?.termoBuscaPrincipal || contextoBusca?.termoBusca || termoBase;
   const tokensBusca = extrairTokensAtivo(termoBase);
   const tokensProduto = [
     ...extrairTokensAtivo(produto?.principioativo_nome),
@@ -112,6 +158,7 @@ function pontuarCandidatoParaIA(produto, contextoBusca) {
   const classificacaoSolicitada = obterClassificacaoSolicitada(contextoBusca?.intencaoClassificacao);
   const buscaComposta = ehBuscaComposta(contextoBusca?.termoBusca);
   const compatibilidades = contarTokensCompativeis(tokensBusca, tokensProduto);
+  const matchDiretoNaDescricao = produtoTemMatchDiretoNaDescricao(produto, termoPrincipal);
   let score = scoreBase(produto);
 
   if (tokensBusca.length > 0) {
@@ -124,8 +171,16 @@ function pontuarCandidatoParaIA(produto, contextoBusca) {
     }
   }
 
+  if (matchDiretoNaDescricao) {
+    score += 260;
+  }
+
   if (!buscaComposta) {
-    score += produtoTemMultiplosPrincipios(produto) ? -40 : 35;
+    if (produtoTemMultiplosPrincipios(produto)) {
+      score += matchDiretoNaDescricao ? 0 : -40;
+    } else {
+      score += 35;
+    }
   }
 
   if (classificacaoSolicitada) {
@@ -287,8 +342,18 @@ function produtoTemMultiplosPrincipios(produto) {
   return principioAtivo.includes('+') || /\b e \b/.test(principioAtivo);
 }
 
-function produtoCombinaComPrincipioSimples(produto, principioAtivoBusca, termoBusca, permitirCompostos = false) {
+function produtoCombinaComPrincipioSimples(
+  produto,
+  principioAtivoBusca,
+  termoBusca,
+  permitirCompostos = false,
+  termoBuscaPrincipal = ''
+) {
   const tokensBusca = extrairTokensAtivo(principioAtivoBusca);
+  const matchDiretoNaDescricao = produtoTemMatchDiretoNaDescricao(
+    produto,
+    termoBuscaPrincipal || termoBusca
+  );
   if (tokensBusca.length === 0) {
     return true;
   }
@@ -308,7 +373,11 @@ function produtoCombinaComPrincipioSimples(produto, principioAtivoBusca, termoBu
   ));
 
   if (!contemPrincipioBusca) {
-    return false;
+    return matchDiretoNaDescricao;
+  }
+
+  if (matchDiretoNaDescricao) {
+    return true;
   }
 
   if (!permitirCompostos && !buscaComposta && produtoTemMultiplosPrincipios(produto)) {
@@ -364,11 +433,44 @@ function aplicarRegrasDeterministicas(produto, contextoBusca) {
   const {
     principioAtivoBusca,
     termoBusca,
+    termoBuscaPrincipal,
     intencaoClassificacao,
     permitirCompostosComoAlternativa
   } = contextoBusca || {};
   const buscaPerfumaria = contextoBusca?.buscaPerfumaria === true;
   const relacionadoAtual = produto?.relacionado_busca;
+  const matchDiretoNaDescricao = produtoTemMatchDiretoNaDescricao(
+    produto,
+    termoBuscaPrincipal || termoBusca
+  );
+  const classificacaoCompativel = produtoCombinaComClassificacaoSolicitada(produto, intencaoClassificacao);
+  const possuiPrincipioAtivoBusca = Boolean(String(principioAtivoBusca || '').trim());
+  const combinaPorPrincipioAtivo = (
+    !buscaPerfumaria &&
+    possuiPrincipioAtivoBusca &&
+    produtoCombinaComPrincipioSimples(
+      produto,
+      principioAtivoBusca,
+      termoBusca,
+      permitirCompostosComoAlternativa === true,
+      termoBuscaPrincipal
+    )
+  );
+
+  if (classificacaoCompativel && (matchDiretoNaDescricao || combinaPorPrincipioAtivo)) {
+    if (relacionadoAtual !== true) {
+      console.log(
+        `[ETAPA 4] Override deterministico: produto marcado como relacionado ` +
+        `| motivo=${matchDiretoNaDescricao ? 'match_direto_descricao' : 'principio_ativo_compativel'} | ` +
+        `${descreverProdutoParaLog(produto)}`
+      );
+    }
+
+    return {
+      ...produto,
+      relacionado_busca: true
+    };
+  }
 
   if (relacionadoAtual !== true) {
     return produto;
@@ -378,12 +480,7 @@ function aplicarRegrasDeterministicas(produto, contextoBusca) {
     return produto;
   }
 
-  if (!produtoCombinaComPrincipioSimples(
-    produto,
-    principioAtivoBusca,
-    termoBusca,
-    permitirCompostosComoAlternativa === true
-  )) {
+  if (!combinaPorPrincipioAtivo) {
     console.log(
       `[ETAPA 4] Override deterministico: produto marcado como nao relacionado ` +
       `| motivo=principio_ativo_composto_ou_divergente | ${descreverProdutoParaLog(produto)}`
@@ -394,7 +491,7 @@ function aplicarRegrasDeterministicas(produto, contextoBusca) {
     };
   }
 
-  if (!produtoCombinaComClassificacaoSolicitada(produto, intencaoClassificacao)) {
+  if (!classificacaoCompativel) {
     console.log(
       `[ETAPA 4] Override deterministico: produto marcado como nao relacionado ` +
       `| motivo=classificacao_divergente | ${descreverProdutoParaLog(produto)}`
@@ -512,8 +609,12 @@ Cada objeto possui:
 - s: score SQL atual
 
 Marque ok=true apenas quando o produto tiver relacao direta com a busca.
+Se o nome comercial/descritivo bater com o termo principal, marque ok=true.
+Se o principio ativo do produto for compativel com o principio ativo resolvido da busca, marque ok=true.
 Marque ok=false quando o item for generico demais, vier de match fraco, ou contrariar algo explicito da busca como forma/concentracao/nome distintivo.
+Se o termo principal aparecer diretamente na descricao/nome comercial do produto, trate isso como forte indicio de relacao direta.
 Se a busca mencionar apenas um principio ativo simples, nao marque como relacionado um produto composto com outros principios ativos, a menos que a busca diga "composto" ou equivalente.
+Nao rejeite um produto composto apenas por ser composto quando o nome comercial/descritivo dele bater diretamente com o termo principal da busca.
 Se classificacao_preferida for GENERICO, prefira apenas itens GENERICO e rejeite REFERENCIA ou SIMILAR sem necessidade.
 Se classificacao_preferida for REFERENCIA ou SIMILAR, siga a mesma logica de aderencia para a classificacao solicitada.
 Rejeite produtos cujo nome ou principio ativo nao tenham relacao direta com o termo principal ou com o principio ativo resolvido.

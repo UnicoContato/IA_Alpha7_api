@@ -132,6 +132,51 @@ function produtoCombinaComBuscaBase(produto, termoBuscaPrincipal) {
   return tokens.every(token => tokensProduto.some(tokenProduto => tokensSaoCompativeis(token, tokenProduto)));
 }
 
+function tokenDiretoCombinaDescricao(tokenBusca, tokenDescricao) {
+  if (!tokenBusca || !tokenDescricao) {
+    return false;
+  }
+
+  if (tokenBusca === tokenDescricao) {
+    return true;
+  }
+
+  if (/^\d+$/.test(tokenBusca)) {
+    return tokenDescricao.startsWith(tokenBusca);
+  }
+
+  if (tokenBusca.length < 5) {
+    return false;
+  }
+
+  return tokenDescricao.startsWith(tokenBusca);
+}
+
+function produtoCombinaDiretamenteComNomeBusca(produto, termoBuscaPrincipal) {
+  const tokensBusca = normalizarTextoBusca(String(termoBuscaPrincipal || ''))
+    .split(' ')
+    .filter(Boolean);
+  const tokensDescricao = normalizarTextoBusca(String(produto?.descricao || ''))
+    .split(' ')
+    .filter(Boolean);
+
+  if (tokensBusca.length === 0 || tokensDescricao.length === 0) {
+    return false;
+  }
+
+  for (let idx = 0; idx <= tokensDescricao.length - tokensBusca.length; idx += 1) {
+    const combina = tokensBusca.every((tokenBusca, offset) => (
+      tokenDiretoCombinaDescricao(tokenBusca, tokensDescricao[idx + offset])
+    ));
+
+    if (combina) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function selecionarProdutosDescricaoConfiaveis(produtosDescricao, termoBuscaPrincipal, limite = 20) {
   const lista = Array.isArray(produtosDescricao) ? produtosDescricao : [];
   const candidatosEstritos = lista.filter(produto => produtoCombinaComBuscaBase(produto, termoBuscaPrincipal));
@@ -177,12 +222,16 @@ function resolverPrincipioAtivoDominante(produtosDescricao, termoBuscaPrincipal)
     })[0] || null;
 }
 
-function podeUsarPrincipioResolvido(principioResolvido, termoBuscaPrincipal) {
+function podeUsarPrincipioResolvido(principioResolvido, termoBuscaPrincipal, permitirCompostoPorNome = false) {
   if (!principioResolvido?.nome) {
     return false;
   }
 
-  if (!ehTextoComposto(termoBuscaPrincipal) && ehTextoComposto(principioResolvido.nome)) {
+  if (
+    !permitirCompostoPorNome &&
+    !ehTextoComposto(termoBuscaPrincipal) &&
+    ehTextoComposto(principioResolvido.nome)
+  ) {
     return false;
   }
 
@@ -1468,12 +1517,25 @@ router.post('/api/buscar-medicamentos', async (req, res) => {
       logResumoProdutos('Resultado confiavel por descricao', produtosDescricaoConfiaveis);
     }
 
+    const matchDiretoNomeNaDescricao = buscaPerfumaria
+      ? false
+      : produtosDescricaoConfiaveis.some(produto => (
+        produtoCombinaDiretamenteComNomeBusca(produto, termoBuscaDescricao)
+      ));
+
     const principioResolvido = buscaPerfumaria
       ? null
       : resolverPrincipioAtivoDominante(produtosDescricaoConfiaveis, termoBuscaDescricao);
-    if (principioResolvido && podeUsarPrincipioResolvido(principioResolvido, principioAtivoBusca || termoBuscaDescricao)) {
+    if (principioResolvido && podeUsarPrincipioResolvido(
+      principioResolvido,
+      principioAtivoBusca || termoBuscaDescricao,
+      matchDiretoNomeNaDescricao
+    )) {
       principioAtivoResolvido = principioResolvido.nome;
       principioAtivoBusca = principioAtivoResolvido;
+      permitirCompostosComoAlternativa = (
+        matchDiretoNomeNaDescricao && ehTextoComposto(principioAtivoResolvido)
+      );
       console.log(
         `[TRACE] Principio ativo resolvido via descricao: "${principioAtivoResolvido}" ` +
         `| id=${principioResolvido.id} | ocorrencias=${principioResolvido.total}`
@@ -1642,6 +1704,7 @@ router.post('/api/buscar-medicamentos', async (req, res) => {
     let filtradoPorIA = false;
     let avaliadoPorIA = false;
     let estatisticasIA = { aprovados: 0, rejeitados: 0, analisados: 0 };
+    let permitirCompostosComoAlternativa = false;
     console.log(`[INFO] Iniciando IA para marcar candidatos`);
     if (produtos.length > 0 ) {
       logResumoProdutos('Candidatos enviados para etapa de IA', produtos);
@@ -1651,7 +1714,8 @@ router.post('/api/buscar-medicamentos', async (req, res) => {
         principioAtivoBusca,
         formaFarmaceutica: formaFarmaceuticaEfetiva,
         intencaoClassificacao: intencaoBusca,
-        buscaPerfumaria
+        buscaPerfumaria,
+        permitirCompostosComoAlternativa
       });
       produtos = resultadoIA.produtos;
       ordenadoPorIA = resultadoIA.ordenado;
