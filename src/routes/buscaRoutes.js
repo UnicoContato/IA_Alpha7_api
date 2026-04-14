@@ -1262,6 +1262,7 @@ router.post('/api/buscar-medicamentos', async (req, res) => {
       || termoBusca;
     let principioAtivoBusca = termoBuscaPrincipal;
     let principioAtivoResolvido = null;
+    let permitirCompostosComoAlternativa = false;
     const buscaPerfumaria = intencaoBusca.querPerfumaria === true;
     let formaFarmaceuticaEfetiva = formaFarmaceutica;
     let variacoesFormaEfetivas = variacoesForma;
@@ -1704,7 +1705,6 @@ router.post('/api/buscar-medicamentos', async (req, res) => {
     let filtradoPorIA = false;
     let avaliadoPorIA = false;
     let estatisticasIA = { aprovados: 0, rejeitados: 0, analisados: 0 };
-    let permitirCompostosComoAlternativa = false;
     console.log(`[INFO] Iniciando IA para marcar candidatos`);
     if (produtos.length > 0 ) {
       logResumoProdutos('Candidatos enviados para etapa de IA', produtos);
