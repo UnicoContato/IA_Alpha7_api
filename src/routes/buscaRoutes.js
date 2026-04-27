@@ -1766,6 +1766,7 @@ router.post('/api/buscar-medicamentos', async (req, res) => {
     }
 
     const produtosParaClarificacao = produtos.filter(produto => produto.relacionado_busca !== false);
+    const produtosRetornados = produtos.filter(produto => produto.relacionado_busca !== false);
     console.log(
       `[CLARIFICACAO] Base considerada para clarificacao: ${produtosParaClarificacao.length} produto(s)`
     );
@@ -1792,9 +1793,15 @@ router.post('/api/buscar-medicamentos', async (req, res) => {
         .filter(p => p.tipo_classificacao_canonica === 'DESCONHECIDO')
         .map(p => `${p.classificacao_id_origem || 'sem_id'}:${p.classificacao_nome_origem || 'sem_nome'}`)
     )];
+    const produtosBloqueadosPorPrincipioAtivo = produtos
+      .filter(p => (
+        p.relacionado_busca === false &&
+        String(p.principioativo_nome || '').trim().toUpperCase() === 'OUTROS'
+      ))
+      .length;
 
     console.log(`\n========================================`);
-    console.log(`[RESULTADO] ${produtos.length} produto(s) encontrado(s)`);
+    console.log(`[RESULTADO] ${produtosRetornados.length} produto(s) retornado(s)`);
     console.log(`[RESULTADO] Métodos: ${metodoBusca}`);
     console.log(`[RESULTADO] Ordenado por IA: ${ordenadoPorIA ? 'Sim' : 'Não'}`);
     console.log(`[RESULTADO] Filtrado por IA: ${filtradoPorIA ? 'Sim' : 'Não'}`);
@@ -1802,9 +1809,10 @@ router.post('/api/buscar-medicamentos', async (req, res) => {
     console.log(
       `[RESULTADO] IA relacionados=${estatisticasIA.aprovados} | nao_relacionados=${estatisticasIA.rejeitados} | analisados=${estatisticasIA.analisados}`
     );
-    logDistribuicao('Distribuicao final por origem', produtos, 'origem');
-    logDistribuicao('Distribuicao final por classificacao', produtos, 'tipo_classificacao_canonica');
-    logResumoProdutos('Resultado final retornado', produtos);
+    console.log(`[RESULTADO] Bloqueados por principio ativo: ${produtosBloqueadosPorPrincipioAtivo}`);
+    logDistribuicao('Distribuicao final por origem', produtosRetornados, 'origem');
+    logDistribuicao('Distribuicao final por classificacao', produtosRetornados, 'tipo_classificacao_canonica');
+    logResumoProdutos('Resultado final retornado', produtosRetornados);
     console.log(`========================================\n`);
 
     return res.status(200).json({
@@ -1823,14 +1831,15 @@ router.post('/api/buscar-medicamentos', async (req, res) => {
         produtos_relacionados_busca_ia: estatisticasIA.aprovados,
         produtos_nao_relacionados_busca_ia: estatisticasIA.rejeitados,
         produtos_analisados_ia: estatisticasIA.analisados,
+        produtos_bloqueados_principio_ativo: produtosBloqueadosPorPrincipioAtivo,
         busca_ambigua: clarificacao.precisa_clarificar,
-        total_produtos: produtos.length,
+        total_produtos: produtosRetornados.length,
         unidade_negocio_id: unidadeNegocioId,
         classificacoes_disponiveis: classificacoesDisponiveis,
         classificacoes_nao_mapeadas: classificacoesNaoMapeadas
       },
       clarificacao,
-      produtos: produtos.map(p => ({
+      produtos: produtosRetornados.map(p => ({
         id: p.id,
         codigo: p.codigo,
         codigo_barras: p.codigobarras,

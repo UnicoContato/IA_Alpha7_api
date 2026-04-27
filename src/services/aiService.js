@@ -429,6 +429,26 @@ function produtoCombinaComClassificacaoSolicitada(produto, intencaoClassificacao
   return tipoClassificacao === classificacaoSolicitada;
 }
 
+function normalizarPrincipioAtivo(valor) {
+  return String(valor || '')
+    .toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function produtoTemPrincipioAtivoBloqueado(produto) {
+  return normalizarPrincipioAtivo(produto?.principioativo_nome) === 'outros';
+}
+
+function aplicarRegrasDeterministicasEmLote(produtos, contextoBusca, relacionadoPadrao = null) {
+  return (produtos || []).map(produto => aplicarRegrasDeterministicas(
+    { ...produto, relacionado_busca: produto?.relacionado_busca ?? relacionadoPadrao },
+    contextoBusca
+  ));
+}
+
 function aplicarRegrasDeterministicas(produto, contextoBusca) {
   const {
     principioAtivoBusca,
@@ -456,6 +476,20 @@ function aplicarRegrasDeterministicas(produto, contextoBusca) {
       termoBuscaPrincipal
     )
   );
+
+  if (produtoTemPrincipioAtivoBloqueado(produto)) {
+    if (relacionadoAtual !== false) {
+      console.log(
+        `[ETAPA 4] Override deterministico: produto marcado como nao relacionado ` +
+        `| motivo=principio_ativo_bloqueado_outros | ${descreverProdutoParaLog(produto)}`
+      );
+    }
+
+    return {
+      ...produto,
+      relacionado_busca: false
+    };
+  }
 
   if (classificacaoCompativel && (matchDiretoNaDescricao || combinaPorPrincipioAtivo)) {
     if (relacionadoAtual !== true) {
@@ -573,10 +607,7 @@ function aplicarScoreFinalIA(produtos) {
 async function marcarProdutosComIA(produtos, contextoBusca) {
   const termoBusca = contextoBusca?.termoBusca || '';
   if (!Array.isArray(produtos) || produtos.length <= 1) {
-    const produtosMarcados = (produtos || []).map(produto => aplicarRegrasDeterministicas(
-      { ...produto, relacionado_busca: true },
-      contextoBusca
-    ));
+    const produtosMarcados = aplicarRegrasDeterministicasEmLote(produtos, contextoBusca, true);
 
     return {
       produtosMarcados,
@@ -668,13 +699,17 @@ async function ordenarPorIA(produtos, contextoBusca) {
   console.log(`\n[ETAPA 4] Marcando ${produtos.length} produtos por RELEVANCIA com IA...`);
 
   if (!OPENAI_API_KEY || OPENAI_API_KEY === 'sua-chave-aqui') {
-    console.log(`[ETAPA 4] ⚠️ IA nao configurada - retornando lista SQL sem marcacao`);
+    console.log(`[ETAPA 4] ⚠️ IA nao configurada - aplicando apenas regras deterministicas`);
+    const produtosMarcados = aplicarRegrasDeterministicasEmLote(produtos, contextoBusca, null);
+    const aprovados = produtosMarcados.filter(produto => produto.relacionado_busca === true).length;
+    const rejeitados = produtosMarcados.filter(produto => produto.relacionado_busca === false).length;
+    const { produtosFiltrados, houveFiltragem } = filtrarProdutosMarcados(produtosMarcados);
     return {
-      produtos: produtos.map(produto => ({ ...produto, relacionado_busca: null })),
+      produtos: aplicarScoreFinalIA(produtosFiltrados),
       ordenado: false,
-      filtrado: false,
+      filtrado: houveFiltragem,
       avaliado: false,
-      estatisticasIA: { aprovados: 0, rejeitados: 0, analisados: 0 }
+      estatisticasIA: { aprovados, rejeitados, analisados: produtos.length }
     };
   }
 
@@ -755,13 +790,17 @@ async function ordenarPorIA(produtos, contextoBusca) {
     };
   } catch (error) {
     console.error(`[ETAPA 4] ⚠️ Erro na IA:`, error.message);
-    console.log(`[ETAPA 4] Usando lista SQL existente`);
+    console.log(`[ETAPA 4] Usando apenas regras deterministicas`);
+    const produtosMarcados = aplicarRegrasDeterministicasEmLote(produtos, contextoBusca, null);
+    const aprovados = produtosMarcados.filter(produto => produto.relacionado_busca === true).length;
+    const rejeitados = produtosMarcados.filter(produto => produto.relacionado_busca === false).length;
+    const { produtosFiltrados, houveFiltragem } = filtrarProdutosMarcados(produtosMarcados);
     return {
-      produtos: produtos.map(produto => ({ ...produto, relacionado_busca: null })),
+      produtos: aplicarScoreFinalIA(produtosFiltrados),
       ordenado: false,
-      filtrado: false,
+      filtrado: houveFiltragem,
       avaliado: false,
-      estatisticasIA: { aprovados: 0, rejeitados: 0, analisados: 0 }
+      estatisticasIA: { aprovados, rejeitados, analisados: produtos.length }
     };
   }
 }
