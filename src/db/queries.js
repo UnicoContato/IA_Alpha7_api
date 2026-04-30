@@ -550,18 +550,24 @@ async function buscarPrecosEOfertas(embalagemIds, unidadeNegocioId) {
         mo.precounitariocomdesconto as preco_com_desconto,
         mo.vigenciainicio as oferta_inicio,
         mo.vigenciatermino as oferta_fim,
+        ico_ativo.precooferta as preco_item_caderno_ativo,
+        ico_ativo.descontooferta as desconto_item_caderno_ativo,
+        co_ativo.datahorainicial as caderno_ativo_inicio,
+        co_ativo.datahorafinal as caderno_ativo_fim,
         
         -- Caderno de oferta relacionado
-        co.nome as nome_caderno_oferta,
-        ico.tipooferta,
-        ico.leve,
-        ico.pague,
+        COALESCE(co.nome, co_ativo.nome) as nome_caderno_oferta,
+        COALESCE(ico.tipooferta, ico_ativo.tipooferta) as tipooferta,
+        COALESCE(ico.leve, ico_ativo.leve) as leve,
+        COALESCE(ico.pague, ico_ativo.pague) as pague,
         
         -- Preço FINAL (lógica de prioridade)
         CASE
           WHEN mo.precooferta IS NOT NULL 
             AND (mo.vigenciatermino IS NULL OR mo.vigenciatermino >= NOW())
           THEN mo.precooferta
+          WHEN ico_ativo.precooferta IS NOT NULL
+          THEN ico_ativo.precooferta
           WHEN peu.precovenda IS NOT NULL 
           THEN peu.precovenda
           ELSE em.precovenda
@@ -571,6 +577,8 @@ async function buscarPrecosEOfertas(embalagemIds, unidadeNegocioId) {
         CASE
           WHEN mo.precooferta IS NOT NULL 
             AND (mo.vigenciatermino IS NULL OR mo.vigenciatermino >= NOW())
+          THEN true
+          WHEN ico_ativo.precooferta IS NOT NULL OR ico_ativo.descontooferta IS NOT NULL
           THEN true
           ELSE false
         END as tem_oferta_ativa
@@ -597,6 +605,28 @@ async function buscarPrecosEOfertas(embalagemIds, unidadeNegocioId) {
       
       LEFT JOIN cadernooferta co 
         ON co.id = mo.cadernoofertaid
+
+      LEFT JOIN LATERAL (
+        SELECT ico2.*
+        FROM itemcadernooferta ico2
+        INNER JOIN cadernooferta co2 
+          ON co2.id = ico2.cadernoofertaid
+        INNER JOIN unidadenegocioparticipantecadernooferta un2
+          ON un2.cadernoofertaid = co2.id
+         AND un2.unidadenegocioid = $${embalagemIds.length + 1}
+        WHERE ico2.embalagemid = em.id
+          AND co2.status = 'A'
+          AND co2.datahorainicial <= NOW()
+          AND (co2.datahorafinal IS NULL OR co2.datahorafinal >= NOW())
+        ORDER BY
+          CASE WHEN ico2.precooferta IS NOT NULL THEN 0 ELSE 1 END,
+          co2.datahorafinal DESC NULLS LAST,
+          ico2.id DESC
+        LIMIT 1
+      ) ico_ativo ON true
+
+      LEFT JOIN cadernooferta co_ativo
+        ON co_ativo.id = ico_ativo.cadernoofertaid
       
       WHERE em.id IN (${placeholders})
     `;
@@ -614,12 +644,12 @@ async function buscarPrecosEOfertas(embalagemIds, unidadeNegocioId) {
         preco_venda_loja: parseFloat(row.preco_venda_loja) || null,
         markup_loja: parseFloat(row.markup_loja) || null,
         plugpharma_preco_controlado: parseFloat(row.plugpharmaprecocontrolado) || null,
-        preco_melhor_oferta: parseFloat(row.preco_melhor_oferta) || null,
-        desconto_oferta_percentual: parseFloat(row.desconto_oferta_percentual) || null,
-        preco_sem_desconto: parseFloat(row.preco_sem_desconto) || null,
-        preco_com_desconto: parseFloat(row.preco_com_desconto) || null,
-        oferta_inicio: row.oferta_inicio,
-        oferta_fim: row.oferta_fim,
+        preco_melhor_oferta: parseFloat(row.preco_melhor_oferta) || parseFloat(row.preco_item_caderno_ativo) || null,
+        desconto_oferta_percentual: parseFloat(row.desconto_oferta_percentual) || parseFloat(row.desconto_item_caderno_ativo) || null,
+        preco_sem_desconto: parseFloat(row.preco_sem_desconto) || parseFloat(row.preco_venda_loja) || parseFloat(row.preco_venda_geral) || null,
+        preco_com_desconto: parseFloat(row.preco_com_desconto) || parseFloat(row.preco_item_caderno_ativo) || null,
+        oferta_inicio: row.oferta_inicio || row.caderno_ativo_inicio,
+        oferta_fim: row.oferta_fim || row.caderno_ativo_fim,
         nome_caderno_oferta: row.nome_caderno_oferta,
         tipo_oferta: row.tipooferta,
         leve: row.leve,
